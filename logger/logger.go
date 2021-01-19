@@ -369,3 +369,8 @@ func Warn(ctx context.Context, format string, v ...interface{}) {
 func Error(ctx context.Context, format string, v ...interface{}) {
 	Log(ctx, zerolog.ErrorLevel, format, v...)
 }
+
+// Critical logs at critical level for the specified sender
+func Critical(ctx context.Context, format string, v ...interface{}) {
+	Log(ctx, zerolog.FatalLevel, format, v...)
+}
