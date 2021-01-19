@@ -360,8 +360,8 @@ func Info(ctx context.Context, format string, v ...interface{}) {
 	Log(ctx, zerolog.InfoLevel, format, v...)
 }
 
-// Warn logs at warn level for the specified sender
-func Warn(ctx context.Context, format string, v ...interface{}) {
+// Warning logs at warn level for the specified sender
+func Warning(ctx context.Context, format string, v ...interface{}) {
 	Log(ctx, zerolog.WarnLevel, format, v...)
 }
 
