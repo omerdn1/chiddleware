@@ -13,6 +13,18 @@ import (
 )
 
 type RequestMiddlewareOptions struct {
+	// Concise mode includes fewer log details during the request flow. For example
+	// exluding details like request content length, user-agent and other details.
+	// This is useful if during development your console is too noisy.
+	Concise bool
+
+	// JSON enables structured logging output in json. Make sure to enable this
+	// in production mode so log aggregators can receive data in parsable format.
+	//
+	// In local development mode, its appropriate to set this value to false to
+	// receive pretty output and stacktraces to stdout.
+	JSON bool
+
 	// ResponseBody enables the inclusion of a portion of the response body in the log entry
 	ResponseBody bool
 
@@ -26,6 +38,8 @@ type requestLogger struct {
 }
 
 var DefaultRequestMiddlewareOptions = RequestMiddlewareOptions{
+	Concise:      false,
+	JSON:         false,
 	ResponseBody: false,
 	SkipHeaders:  nil,
 }
@@ -86,9 +100,9 @@ func requestLoggerHandler(f LogFormatter, opts RequestMiddlewareOptions) func(ne
 func (l *requestLogger) NewLogEntry(r *http.Request) LogEntry {
 	entry := &RequestLoggerEntry{}
 	entry.Logger = l.Logger.With().Fields(requestLogFields(r, true)).Logger()
-	if !DefaultLoggerOptions.Concise {
+	if !DefaultRequestMiddlewareOptions.Concise {
 		msg := fmt.Sprintf("Request: %s %s", r.Method, r.URL.Path)
-		entry.Logger.Info().Fields(requestLogFields(r, DefaultLoggerOptions.Concise)).Msgf(msg)
+		entry.Logger.Info().Fields(requestLogFields(r, DefaultRequestMiddlewareOptions.Concise)).Msgf(msg)
 	}
 	return entry
 }
@@ -146,7 +160,7 @@ func (l *RequestLoggerEntry) Write(status, bytes int, header http.Header, elapse
 		"elapsed": float64(elapsed.Nanoseconds()) / 1000000.0, // in milliseconds
 	}
 
-	if !DefaultLoggerOptions.Concise {
+	if !DefaultRequestMiddlewareOptions.Concise {
 		// Include response header, as well for error status codes (>400) we include
 		// the response body so we may inspect the log message sent back to the client.
 		if status >= 400 {
@@ -165,7 +179,7 @@ func (l *RequestLoggerEntry) Write(status, bytes int, header http.Header, elapse
 
 func (l *RequestLoggerEntry) Panic(v interface{}, stack []byte) {
 	stacktrace := "#"
-	if DefaultLoggerOptions.JSON {
+	if DefaultRequestMiddlewareOptions.JSON {
 		stacktrace = string(stack)
 	}
 
@@ -176,7 +190,7 @@ func (l *RequestLoggerEntry) Panic(v interface{}, stack []byte) {
 
 	l.msg = fmt.Sprintf("%+v", v)
 
-	if !DefaultLoggerOptions.JSON {
+	if !DefaultRequestMiddlewareOptions.JSON {
 		middleware.PrintPrettyStack(v)
 	}
 }
@@ -199,7 +213,7 @@ func headerLogField(header http.Header) map[string]string {
 		}
 
 		// Redact user defined sensitive headers
-		for _, skip := range DefaultLoggerOptions.SkipHeaders {
+		for _, skip := range DefaultRequestMiddlewareOptions.SkipHeaders {
 			if k == skip {
 				headerField[k] = "***"
 				break
