@@ -1,4 +1,4 @@
-package logger
+package zerologger
 
 import (
 	"bytes"
