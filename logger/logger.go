@@ -1,50 +1,23 @@
 package logger
 
 import (
-	"context"
 	"fmt"
 	"io"
 	"io/ioutil"
 	"net/http"
-	"os"
 	"strings"
 	"time"
 
 	"github.com/go-chi/chi/middleware"
 	"github.com/rs/zerolog"
-	"github.com/rs/zerolog/log"
 )
-
-type LoggerOptions struct {
-	// LogLevel defines the minimum level of severity that app should log.
-	//
-	// Must be one of: ["trace", "debug", "info", "warn", "error", "critical"]
-	LogLevel string
-
-	// JSON enables structured logging output in json. Make sure to enable this
-	// in production mode so log aggregators can receive data in parsable format.
-	//
-	// In local development mode, its appropriate to set this value to false to
-	// receive pretty output and stacktraces to stdout.
-	JSON bool
-
-	// Concise mode includes fewer log details during the request flow. For example
-	// exluding details like request content length, user-agent and other details.
-	// This is useful if during development your console is too noisy.
-	Concise bool
-
-	// Tags are additional fields included at the root level of all logs.
-	// These can be useful for example the commit hash of a build, or an environment
-	// name like prod/stg/dev
-	Tags map[string]string
-
-	// SkipHeaders are additional headers which are redacted from the logs
-	SkipHeaders []string
-}
 
 type RequestMiddlewareOptions struct {
 	// ResponseBody enables the inclusion of a portion of the response body in the log entry
 	ResponseBody bool
+
+	// SkipHeaders are additional headers which are redacted from the logs
+	SkipHeaders []string
 }
 
 type requestLogger struct {
@@ -52,77 +25,40 @@ type requestLogger struct {
 	Logger zerolog.Logger
 }
 
-var DefaultLoggerOptions = LoggerOptions{
-	LogLevel:    "info",
-	JSON:        false,
-	Concise:     false,
-	Tags:        nil,
-	SkipHeaders: nil,
-}
-
 var DefaultRequestMiddlewareOptions = RequestMiddlewareOptions{
 	ResponseBody: false,
-}
-
-// configure configures the logger using the given options.
-func configure(opts LoggerOptions) {
-	if opts.LogLevel == "" {
-		opts.LogLevel = "info"
-	}
-
-	// Pre-downcase all SkipHeaders
-	for i, header := range opts.SkipHeaders {
-		opts.SkipHeaders[i] = strings.ToLower(header)
-	}
-
-	// Set the zerolog global level
-	logLevel, err := zerolog.ParseLevel(strings.ToLower(opts.LogLevel))
-	if err != nil {
-		fmt.Printf("logger: error converting level string into zerolevel value. %v\n", err)
-		os.Exit(1)
-	}
-	zerolog.SetGlobalLevel(logLevel)
-
-	zerolog.LevelFieldName = "level"
-	zerolog.TimestampFieldName = "timestamp"
-	zerolog.TimeFieldFormat = time.RFC3339Nano
-
-	if !opts.JSON {
-		log.Logger = log.Output(zerolog.ConsoleWriter{Out: os.Stderr, TimeFormat: time.RFC3339})
-	}
-}
-
-// New initiates a new logger instance using the given serviceName and options.
-func New(serviceName string, opts ...LoggerOptions) zerolog.Logger {
-	if len(opts) > 0 {
-		configure(opts[0])
-	} else {
-		configure(DefaultLoggerOptions)
-	}
-	logger := log.With().Str("service", strings.ToLower(serviceName))
-	if !DefaultLoggerOptions.Concise && len(DefaultLoggerOptions.Tags) > 0 {
-		logger = logger.Fields(map[string]interface{}{
-			"tags": DefaultLoggerOptions.Tags,
-		})
-	}
-	return logger.Logger()
+	SkipHeaders:  nil,
 }
 
 // RequestMiddleware is an http middleware to log http requests and responses.
 func RequestMiddleware(logger zerolog.Logger, opts ...RequestMiddlewareOptions) func(next http.Handler) http.Handler {
 	if len(opts) > 0 {
 		return requestLoggerHandler(&requestLogger{logger}, opts[0])
-	} else {
-		return requestLoggerHandler(&requestLogger{logger}, DefaultRequestMiddlewareOptions)
 	}
+	return requestLoggerHandler(&requestLogger{logger}, DefaultRequestMiddlewareOptions)
+}
+
+// LogFormatter initiates the beginning of a new LogEntry per request.
+// See DefaultLogFormatter for an example implementation.
+type LogFormatter interface {
+	NewLogEntry(r *http.Request) LogEntry
+}
+
+// LogEntry records the final log when a request completes.
+// See defaultLogEntry for an example implementation.
+type LogEntry interface {
+	Write(status, bytes int, header http.Header, elapsed time.Duration, extra interface{})
+	Panic(v interface{}, stack []byte)
 }
 
 // RequestLogger returns a logger handler using a custom LogFormatter.
-func requestLoggerHandler(f middleware.LogFormatter, opts RequestMiddlewareOptions) func(next http.Handler) http.Handler {
+func requestLoggerHandler(f LogFormatter, opts RequestMiddlewareOptions) func(next http.Handler) http.Handler {
 	return func(next http.Handler) http.Handler {
 		fn := func(w http.ResponseWriter, r *http.Request) {
 			entry := f.NewLogEntry(r)
 			ww := middleware.NewWrapResponseWriter(w, r.ProtoMajor)
+
+			next.ServeHTTP(ww, r)
 
 			var buf io.ReadWriter
 			if opts.ResponseBody {
@@ -142,14 +78,12 @@ func requestLoggerHandler(f middleware.LogFormatter, opts RequestMiddlewareOptio
 				}
 				entry.Write(status, bytesWritten, ww.Header(), time.Since(t1), respBody)
 			}()
-
-			next.ServeHTTP(ww, middleware.WithLogEntry(r, entry))
 		}
 		return http.HandlerFunc(fn)
 	}
 }
 
-func (l *requestLogger) NewLogEntry(r *http.Request) middleware.LogEntry {
+func (l *requestLogger) NewLogEntry(r *http.Request) LogEntry {
 	entry := &RequestLoggerEntry{}
 	entry.Logger = l.Logger.With().Fields(requestLogFields(r, true)).Logger()
 	if !DefaultLoggerOptions.Concise {
@@ -303,74 +237,4 @@ func statusLabel(status int) string {
 	default:
 		return "Unknown"
 	}
-}
-
-// Helper methods used by the application to get the request-scoped
-// logger entry and set additional fields between handlers.
-//
-// This is a useful pattern to use to set state on the entry as it
-// passes through the handler chain, which at any point can be logged
-// with a call to .Print(), .Info(), etc.
-
-func LogEntry(ctx context.Context) zerolog.Logger {
-	entry := ctx.Value(middleware.LogEntryCtxKey).(*RequestLoggerEntry)
-	return entry.Logger
-}
-
-func LogEntrySetField(ctx context.Context, key, value string) {
-	if entry, ok := ctx.Value(middleware.LogEntryCtxKey).(*RequestLoggerEntry); ok {
-		entry.Logger = entry.Logger.With().Str(key, value).Logger()
-	}
-}
-
-func LogEntrySetFields(ctx context.Context, fields map[string]interface{}) {
-	if entry, ok := ctx.Value(middleware.LogEntryCtxKey).(*RequestLoggerEntry); ok {
-		entry.Logger = entry.Logger.With().Fields(fields).Logger()
-	}
-}
-
-// Helper methods for manual logging by the application.
-
-// Log logs at the specified level for the specified sender
-func Log(ctx context.Context, level zerolog.Level, format string, v ...interface{}) {
-	entry := ctx.Value(middleware.LogEntryCtxKey).(*RequestLoggerEntry)
-	var ev *zerolog.Event
-
-	switch level {
-	case zerolog.DebugLevel:
-		ev = entry.Logger.Debug()
-	case zerolog.InfoLevel:
-		ev = entry.Logger.Info()
-	case zerolog.WarnLevel:
-		ev = entry.Logger.Warn()
-	default:
-		ev = entry.Logger.Error()
-	}
-
-	ev.Msg(fmt.Sprintf(format, v...))
-}
-
-// Debug logs at debug level for the specified sender
-func Debug(ctx context.Context, format string, v ...interface{}) {
-	Log(ctx, zerolog.DebugLevel, format, v...)
-}
-
-// Info logs at info level for the specified sender
-func Info(ctx context.Context, format string, v ...interface{}) {
-	Log(ctx, zerolog.InfoLevel, format, v...)
-}
-
-// Warning logs at warn level for the specified sender
-func Warning(ctx context.Context, format string, v ...interface{}) {
-	Log(ctx, zerolog.WarnLevel, format, v...)
-}
-
-// Error logs at error level for the specified sender
-func Error(ctx context.Context, format string, v ...interface{}) {
-	Log(ctx, zerolog.ErrorLevel, format, v...)
-}
-
-// Critical logs at critical level for the specified sender
-func Critical(ctx context.Context, format string, v ...interface{}) {
-	Log(ctx, zerolog.FatalLevel, format, v...)
 }
